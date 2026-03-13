@@ -74,7 +74,11 @@ public class ArrowBuffer {
     }
 
     static func copyCurrent(_ from: ArrowBuffer, to: inout ArrowBuffer, len: UInt) {
-        to.rawPointer.copyMemory(from: from.rawPointer, byteCount: Int(len))
+        // Ensure we don't read beyond source or write beyond destination capacity
+        let safeCopyLen = min(len, min(from.capacity, to.capacity))
+        if safeCopyLen > 0 {
+            to.rawPointer.copyMemory(from: from.rawPointer, byteCount: Int(safeCopyLen))
+        }
     }
 
     private static func alignTo64(_ length: UInt) -> UInt {

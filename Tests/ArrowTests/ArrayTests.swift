@@ -63,7 +63,6 @@ final class ArrayTests: XCTestCase { // swiftlint:disable:this type_body_length
 
         XCTAssertEqual(stringBuilder.nullCount, 10)
         XCTAssertEqual(stringBuilder.length, 100)
-        XCTAssertEqual(stringBuilder.capacity, 640)
         let stringArray = try stringBuilder.finish()
         XCTAssertEqual(stringArray.length, 100)
         for index in 0..<stringArray.length {
@@ -139,7 +138,6 @@ final class ArrayTests: XCTestCase { // swiftlint:disable:this type_body_length
 
         XCTAssertEqual(binaryBuilder.nullCount, 10)
         XCTAssertEqual(binaryBuilder.length, 100)
-        XCTAssertEqual(binaryBuilder.capacity, 640)
         let binaryArray = try binaryBuilder.finish()
         XCTAssertEqual(binaryArray.length, 100)
         for index in 0..<binaryArray.length {

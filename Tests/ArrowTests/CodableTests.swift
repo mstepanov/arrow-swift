@@ -331,4 +331,253 @@ final class CodableTests: XCTestCase { // swiftlint:disable:this type_body_lengt
             }
         }
     }
+
+    // MARK: - Large Array Encoding Tests (Buffer Boundary Coverage)
+
+    /// Test encoding a large array that triggers multiple buffer resizes
+    func testArrowEncoderLargeInt64Array() throws {
+        var largeArray = [Int64?]()
+        let count = 1000
+
+        for index in 0..<count {
+            if index % 100 == 0 {
+                largeArray.append(nil)  // Add nulls at regular intervals
+            } else {
+                largeArray.append(Int64(index))
+            }
+        }
+
+        let rb = try ArrowEncoder.encode(largeArray)!
+        XCTAssertEqual(Int(rb.length), count)
+        XCTAssertEqual(rb.columns.count, 1)
+        XCTAssertEqual(rb.columns[0].type.id, ArrowTypeId.int64)
+
+        for index in 0..<count {
+            if index % 100 == 0 {
+                let anyArray = rb.columns[0].array
+                XCTAssertNil(anyArray.asAny(UInt(index)))
+            } else {
+                XCTAssertEqual(getArrayValue(rb, colIndex: 0, rowIndex: UInt(index)), Int64(index))
+            }
+        }
+    }
+
+    /// Test encoding a large string array that exercises variable-length buffer resizing
+    func testArrowEncoderLargeStringArray() throws {
+        var stringArray = [String?]()
+        let count = 500
+
+        for index in 0..<count {
+            if index % 50 == 0 {
+                stringArray.append(nil)
+            } else {
+                // Use varying string lengths to stress the variable buffer
+                stringArray.append("String value #\(index) with some additional content to vary length: \(String(repeating: "x", count: index % 20))")
+            }
+        }
+
+        let rb = try ArrowEncoder.encode(stringArray)!
+        XCTAssertEqual(Int(rb.length), count)
+        XCTAssertEqual(rb.columns.count, 1)
+        XCTAssertEqual(rb.columns[0].type.id, ArrowTypeId.string)
+
+        for index in 0..<count {
+            if index % 50 == 0 {
+                let anyArray = rb.columns[0].array
+                XCTAssertNil(anyArray.asAny(UInt(index)))
+            } else {
+                let expected = "String value #\(index) with some additional content to vary length: \(String(repeating: "x", count: index % 20))"
+                XCTAssertEqual(getArrayValue(rb, colIndex: 0, rowIndex: UInt(index)), expected)
+            }
+        }
+    }
+
+    /// Test encoding a large boolean array (bitmap storage boundary test)
+    func testArrowEncoderLargeBoolArray() throws {
+        var boolArray = [Bool?]()
+        let count = 1000
+
+        for index in 0..<count {
+            if index % 8 == 7 {  // Null at last bit of each byte
+                boolArray.append(nil)
+            } else {
+                boolArray.append(index % 2 == 0)
+            }
+        }
+
+        let rb = try ArrowEncoder.encode(boolArray)!
+        XCTAssertEqual(Int(rb.length), count)
+        XCTAssertEqual(rb.columns.count, 1)
+        XCTAssertEqual(rb.columns[0].type.id, ArrowTypeId.boolean)
+
+        let anyArray = rb.columns[0].array
+        for index in 0..<count {
+            if index % 8 == 7 {
+                XCTAssertNil(anyArray.asAny(UInt(index)))
+            } else {
+                let actual = anyArray.asAny(UInt(index)) as? Bool
+                XCTAssertNotNil(actual, "Expected non-nil Bool at index \(index)")
+                XCTAssertEqual(actual, index % 2 == 0, "Mismatch at index \(index)")
+            }
+        }
+    }
+
+    /// Test encoding a large keyed struct array that exercises multiple column types
+    func testArrowEncoderLargeKeyedArray() throws {
+        var infos = [TestClass]()
+        let count = 500
+
+        for index in 0..<count {
+            let tClass = TestClass()
+            tClass.propBool = index % 2 == 0
+            tClass.propInt8 = Int8(truncatingIfNeeded: index)
+            tClass.propInt16 = Int16(truncatingIfNeeded: index)
+            tClass.propInt32 = Int32(index)
+            tClass.propInt64 = Int64(index)
+            tClass.propUInt8 = UInt8(truncatingIfNeeded: index)
+            tClass.propUInt16 = UInt16(truncatingIfNeeded: index)
+            tClass.propUInt32 = UInt32(index)
+            tClass.propUInt64 = UInt64(index)
+            tClass.propFloat = Float(index)
+            tClass.propDouble = index % 10 == 0 ? nil : Double(index)
+            tClass.propString = "Row \(index)"
+            tClass.propDate = Date(timeIntervalSince1970: Double(index * 86400))
+            infos.append(tClass)
+        }
+
+        let rb = try ArrowEncoder.encode(infos)!
+        XCTAssertEqual(Int(rb.length), count)
+        XCTAssertEqual(rb.columns.count, 13)
+
+        // Verify a few values to ensure encoding was correct
+        for index in stride(from: 0, to: count, by: 50) {
+            XCTAssertEqual(getArrayValue(rb, colIndex: 3, rowIndex: UInt(index)), Int32(index))
+            XCTAssertEqual(getArrayValue(rb, colIndex: 11, rowIndex: UInt(index)), "Row \(index)")
+        }
+    }
+
+    /// Test encoding with all nulls to exercise null bitmap edge cases
+    func testArrowEncoderAllNullsArray() throws {
+        var nullArray = [Int64?]()
+        let count = 256  // Multiple of 8 to test byte boundaries
+
+        for _ in 0..<count {
+            nullArray.append(nil)
+        }
+
+        let rb = try ArrowEncoder.encode(nullArray)!
+        XCTAssertEqual(Int(rb.length), count)
+        XCTAssertEqual(rb.columns[0].nullCount, UInt(count))
+
+        for index in 0..<count {
+            let anyArray = rb.columns[0].array
+            XCTAssertNil(anyArray.asAny(UInt(index)))
+        }
+    }
+
+    /// Test encoding with nulls at specific byte boundaries
+    func testArrowEncoderNullsAtByteBoundaries() throws {
+        var array = [UInt8?]()
+        let count = 100
+
+        // Place nulls at positions 0, 8, 16, 24... (start of each byte)
+        // and at positions 7, 15, 23, 31... (end of each byte)
+        for index in 0..<count {
+            if index % 8 == 0 || index % 8 == 7 {
+                array.append(nil)
+            } else {
+                array.append(UInt8(truncatingIfNeeded: index))
+            }
+        }
+
+        let rb = try ArrowEncoder.encode(array)!
+        XCTAssertEqual(Int(rb.length), count)
+
+        for index in 0..<count {
+            if index % 8 == 0 || index % 8 == 7 {
+                let anyArray = rb.columns[0].array
+                XCTAssertNil(anyArray.asAny(UInt(index)))
+            } else {
+                XCTAssertEqual(getArrayValue(rb, colIndex: 0, rowIndex: UInt(index)), UInt8(truncatingIfNeeded: index))
+            }
+        }
+    }
+
+    /// Test encoding Date array with nulls
+    func testArrowEncoderLargeDateArray() throws {
+        var dateArray = [Date?]()
+        let count = 300
+        let baseDate = Date(timeIntervalSince1970: 0)
+
+        for index in 0..<count {
+            if index % 30 == 0 {
+                dateArray.append(nil)
+            } else {
+                dateArray.append(Date(timeInterval: Double(index * 86400), since: baseDate))
+            }
+        }
+
+        let rb = try ArrowEncoder.encode(dateArray)!
+        XCTAssertEqual(Int(rb.length), count)
+        XCTAssertEqual(rb.columns[0].type.id, ArrowTypeId.date64)
+
+        for index in 0..<count {
+            if index % 30 == 0 {
+                let anyArray = rb.columns[0].array
+                XCTAssertNil(anyArray.asAny(UInt(index)))
+            }
+        }
+    }
+
+    /// Test encoding Float array with boundary conditions
+    func testArrowEncoderLargeFloatArray() throws {
+        var floatArray = [Float?]()
+        let count = 500
+
+        for index in 0..<count {
+            if index % 8 == 0 {
+                floatArray.append(nil)
+            } else {
+                floatArray.append(Float(index) * 0.1)
+            }
+        }
+
+        let rb = try ArrowEncoder.encode(floatArray)!
+        XCTAssertEqual(Int(rb.length), count)
+        XCTAssertEqual(rb.columns[0].type.id, ArrowTypeId.float)
+
+        for index in stride(from: 1, to: count, by: 10) {
+            if index % 8 != 0 {
+                let expected = Float(index) * 0.1
+                let actual: Float? = getArrayValue(rb, colIndex: 0, rowIndex: UInt(index))
+                XCTAssertEqual(actual!, expected, accuracy: 0.0001)
+            }
+        }
+    }
+
+    /// Test encoding Double array with boundary conditions
+    func testArrowEncoderLargeDoubleArray() throws {
+        var doubleArray = [Double?]()
+        let count = 500
+
+        for index in 0..<count {
+            if index % 16 == 0 {
+                doubleArray.append(nil)
+            } else {
+                doubleArray.append(Double(index) * 0.001)
+            }
+        }
+
+        let rb = try ArrowEncoder.encode(doubleArray)!
+        XCTAssertEqual(Int(rb.length), count)
+        XCTAssertEqual(rb.columns[0].type.id, ArrowTypeId.double)
+
+        for index in stride(from: 1, to: count, by: 17) {
+            if index % 16 != 0 {
+                let expected = Double(index) * 0.001
+                let actual: Double? = getArrayValue(rb, colIndex: 0, rowIndex: UInt(index))
+                XCTAssertEqual(actual!, expected, accuracy: 0.0000001)
+            }
+        }
+    }
 }
