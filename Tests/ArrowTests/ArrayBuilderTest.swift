@@ -274,4 +274,129 @@ final class ArrayBuilderTests: XCTestCase {
             XCTAssertNil(array[UInt(i)])
         }
     }
+
+    // MARK: - String/Binary Offsets Buffer Validation
+
+    /// Test that string array offsets buffer has exactly (length + 1) entries
+    /// This validates the fix for the malformed Arrow file issue where offsets
+    /// buffer was N*4 bytes instead of (N+1)*4 bytes, causing pyarrow bus errors.
+    func testStringOffsetsBufferSize() throws {
+        let builder = try ArrowArrayBuilders.loadStringArrayBuilder()
+        let count = 944  // Matches the exact row count that triggered the malformed files
+
+        for i in 0..<count {
+            builder.append("symbol_\(i)")
+        }
+
+        let array = try builder.finish()
+        XCTAssertEqual(Int(array.length), count)
+
+        // buffers[1] is the offsets buffer for variable-length types
+        // Arrow format requires (length + 1) * sizeof(Int32) bytes
+        let offsetsBuffer = array.arrowData.buffers[1]
+        let requiredBytes = UInt((count + 1) * MemoryLayout<Int32>.stride)
+        XCTAssertGreaterThanOrEqual(offsetsBuffer.capacity, requiredBytes,
+            "Offsets buffer capacity \(offsetsBuffer.capacity) must be >= \(requiredBytes) for \(count) rows")
+
+        // Verify data integrity
+        for i in 0..<count {
+            XCTAssertEqual(array[UInt(i)], "symbol_\(i)")
+        }
+    }
+
+    /// Test that binary array offsets buffer also has (length + 1) entries
+    func testBinaryOffsetsBufferSize() throws {
+        let builder = try ArrowArrayBuilders.loadBinaryArrayBuilder()
+        let count = 944
+
+        for i in 0..<count {
+            builder.append("data_\(i)".data(using: .utf8))
+        }
+
+        let array = try builder.finish()
+        XCTAssertEqual(Int(array.length), count)
+
+        let offsetsBuffer = array.arrowData.buffers[1]
+        let requiredBytes = UInt((count + 1) * MemoryLayout<Int32>.stride)
+        XCTAssertGreaterThanOrEqual(offsetsBuffer.capacity, requiredBytes,
+            "Offsets buffer capacity \(offsetsBuffer.capacity) must be >= \(requiredBytes) for \(count) rows")
+    }
+
+    /// Test string offsets buffer with nulls interspersed (matching malformed file pattern)
+    func testStringOffsetsBufferWithNulls() throws {
+        let builder = try ArrowArrayBuilders.loadStringArrayBuilder()
+        let count = 944
+
+        for i in 0..<count {
+            if i % 10 == 0 {
+                builder.append(nil)
+            } else {
+                builder.append("val_\(i)")
+            }
+        }
+
+        let array = try builder.finish()
+        XCTAssertEqual(Int(array.length), count)
+
+        let offsetsBuffer = array.arrowData.buffers[1]
+        let requiredBytes = UInt((count + 1) * MemoryLayout<Int32>.stride)
+        XCTAssertGreaterThanOrEqual(offsetsBuffer.capacity, requiredBytes,
+            "Offsets buffer capacity \(offsetsBuffer.capacity) must be >= \(requiredBytes) for \(count) rows")
+
+        // Verify values and nulls roundtrip correctly
+        for i in 0..<count {
+            if i % 10 == 0 {
+                XCTAssertNil(array[UInt(i)])
+            } else {
+                XCTAssertEqual(array[UInt(i)], "val_\(i)")
+            }
+        }
+    }
+
+    /// Test write-read roundtrip for string column validates structural integrity
+    func testStringWriteReadRoundtrip() throws {
+        let builder = try ArrowArrayBuilders.loadStringArrayBuilder()
+        let count = 944
+
+        for i in 0..<count {
+            builder.append("symbol_\(i)")
+        }
+
+        let stringHolder = try builder.toHolder()
+
+        let result = RecordBatch.Builder()
+            .addColumn("symbol", arrowArray: stringHolder)
+            .finish()
+
+        switch result {
+        case .success(let rb):
+            XCTAssertEqual(Int(rb.length), count)
+
+            // Write to IPC stream and read back
+            let writer = ArrowWriter()
+            let writerInfo = ArrowWriter.Info(.recordbatch, schema: rb.schema, batches: [rb])
+            switch writer.writeStreaming(writerInfo) {
+            case .success(let writeData):
+                let reader = ArrowReader()
+                switch reader.readStreaming(writeData) {
+                case .success(let readerResult):
+                    XCTAssertEqual(readerResult.batches.count, 1)
+                    let readBatch = readerResult.batches[0]
+                    XCTAssertEqual(Int(readBatch.length), count)
+
+                    let col: ArrowArray<String> = readBatch.data(for: 0)
+                    for i in 0..<count {
+                        XCTAssertEqual(col[UInt(i)], "symbol_\(i)",
+                            "Mismatch at index \(i) after roundtrip")
+                    }
+                case .failure(let error):
+                    XCTFail("Failed to read stream: \(error)")
+                }
+            case .failure(let error):
+                XCTFail("Failed to write stream: \(error)")
+            }
+        case .failure(let error):
+            XCTFail("Failed to create RecordBatch: \(error)")
+        }
+    }
 }

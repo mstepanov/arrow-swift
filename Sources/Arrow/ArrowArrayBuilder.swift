@@ -57,7 +57,9 @@ public class ArrowArrayBuilder<T: ArrowBufferBuilder, U: ArrowArray<T.ItemType>>
 
     public func finish() throws -> ArrowArray<T.ItemType> {
         let buffers = self.bufferBuilder.finish()
-        let arrowData = try ArrowData(self.type, buffers: buffers, nullCount: self.nullCount)
+        let arrowData = try ArrowData(self.type, buffers: buffers,
+                                      children: [ArrowData](), nullCount: self.nullCount,
+                                      length: self.length)
         let array = try U(arrowData)
         return array
     }

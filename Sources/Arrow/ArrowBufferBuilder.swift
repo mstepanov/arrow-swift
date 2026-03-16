@@ -306,7 +306,9 @@ public class VariableBufferBuilder<T>: ValuesBufferBuilder<T>, ArrowBufferBuilde
         let length = self.length
         var values = ArrowBuffer.createBuffer(self.values.length, size: UInt(MemoryLayout<UInt8>.size))
         var nulls = ArrowBuffer.createBuffer(length/8 + 1, size: UInt(MemoryLayout<UInt8>.size))
-        var offsets = ArrowBuffer.createBuffer(length, size: UInt(MemoryLayout<Int32>.size))
+        // Arrow format requires length + 1 offsets for variable-length types:
+        // each element i spans [offset[i], offset[i+1]), so N elements need N+1 offsets.
+        var offsets = ArrowBuffer.createBuffer(length + 1, size: UInt(MemoryLayout<Int32>.size))
         ArrowBuffer.copyCurrent(self.values, to: &values, len: min(values.capacity, self.values.capacity))
         ArrowBuffer.copyCurrent(self.nulls, to: &nulls, len: min(nulls.capacity, self.nulls.capacity))
         ArrowBuffer.copyCurrent(self.offsets, to: &offsets, len: min(offsets.capacity, self.offsets.capacity))
